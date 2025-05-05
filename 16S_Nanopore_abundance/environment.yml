@@ -1,0 +1,16 @@
+name: nanopore_pipeline
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - seqkit
+  - nanofilt
+  - vsearch
+  - minimap2
+  - samtools
+  - python=3.9
+  - parallel
+  - pip
+  - pip:
+      - pandas
