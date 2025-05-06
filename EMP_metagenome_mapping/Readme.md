@@ -30,33 +30,6 @@ conda env create -f envs/samtools_env.yml
 conda env create -f envs/pynano.yml
 ```
 
----
-
-## Configuration
-
-Edit `config.env` with your paths and settings:
-
-```bash
-FASTQ_FILE=/data/emp/exp103_pass.fastq.gz
-SEQ_DIR=/data/emp/split_reads
-BARCODE_FILE=/data/emp/barcodes.csv
-OUTPUT_DIR=/data/emp/output
-
-MINIBAR_SCRIPT=scripts/minibar.py
-REV_COMP_SCRIPT=scripts/rev_cmplt_minibar_output.py
-REFERENCE_DB=/data/db/filtered_database.fasta
-
-FLIP_SUFFIX=_rev_complemented
-SAMPLE_PREFIX=OS20241206
-
-THREADS=50
-Q_THRE=15
-MIN_LEN=1500
-MAX_LEN=1700
-```
-
----
-
 ## Usage
 
 ### 1. Run the full pipeline
@@ -71,21 +44,7 @@ bash pipeline.sh
 bash align_fasta.sh
 ```
 
-### 3. Optional: Clean unwanted genomes from reference
-
-```bash
-bash clean_uneeded_genomes.sh
-```
-
-### 4. Summarize mapped reads into table
-
-**Basic version:**
-
-```bash
-python make_count_table_updated.py --input_dir ./analysis --output_file otu_count_table.csv
-```
-
-**With genome filtering:**
+### 3. Summarize mapped reads into table
 
 ```bash
 python make_count_table_updated_with_mistmatch_filter_db.py
