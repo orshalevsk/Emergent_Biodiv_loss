@@ -29,6 +29,8 @@ conda env create -f envs/vsearch_env.yml
 conda env create -f envs/samtools_env.yml
 conda env create -f envs/pynano.yml
 ```
+## Configuration
+Change default value to your directory path and preferences in pipeline.sh
 
 ## Usage
 
@@ -38,13 +40,7 @@ conda env create -f envs/pynano.yml
 bash pipeline.sh
 ```
 
-### 2. Run only alignment on FASTA files
-
-```bash
-bash align_fasta.sh
-```
-
-### 3. Summarize mapped reads into table
+### 2. Summarize mapped reads into table
 
 ```bash
 python make_count_table_updated_with_mistmatch_filter_db.py
