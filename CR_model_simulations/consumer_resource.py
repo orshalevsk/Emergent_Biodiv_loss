@@ -1,7 +1,4 @@
 import numpy as np
-from scipy.special import erf
-import matplotlib.pyplot as plt
-import matplotlib as mpl
 import copy
 from concurrent.futures import ProcessPoolExecutor
 from scipy.integrate import solve_ivp
@@ -11,6 +8,7 @@ import datetime
 import warnings
 
 # warnings.filterwarnings("ignore", message="xxx")
+TIME_STAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
 class MergedSolution:
     '''Merge multiple odesolver solutions (e.g. daily solutions in a daily dilution scenario) into one solution.'''
@@ -52,42 +50,57 @@ class MergedSolution:
 class ConsumerResourceModel:
     """ A class to define a consumer-resource model.
 
-    Hypothesis:
-    defalut para: diversity increases with resrouce diversity
-    HACC vs. MACC: HACC takes up more resources as resource diversity increases
-    changing HACC/MACC distribution should change species div vs res div relationship
+    Model Parameters:
+    * nS: number of species
+    * nR: number of resources
+    * v0: maximum uptake rate matrix (nS x nR)
+    * km0: half-saturation constant matrix (nS x nR) under baseline conditions
+    * r0: maximum growth rate vector (nS)
+    * e: conversion efficiency matrix (nS x nR)
+    * b: cross-feeding matrix (nS x nR x nR), where b_ijk specifies fraction of unusable resource j converted to resource k by species i
+    * gamma: resource diversity penalty parameter (nS), controls how km changes with resource diversity
 
-    Key features for base model:
-    * spe i uptake res j with a rate of v_ij = v0_ij * R_j / (km_ij + R_j), and turn it into biomass with an efficiency of e_ij
-        for simplicity, default to e_ij = 1 (no cross-feeding), v_ij = 1
-    * if e_ij < 1, the rest energy (1 - e_ij) * v_ij is secreted as other resources
-        b_ijk (S * R * R matrix) specifying species i secretes the unusable part of resource j to resource k(s)
-            sum(b_ijk, axes=2) = 1
-    * diff spe takes up diff res, modify affility by km, maybe also by a 1or0 v_ij matrix
-    * spe i has a max growth rate of r0_i
-    * realized growth rate of spe i is a_i = sum_j(e_ij * v_ij), if > r0_i scale down to r0_i
-        i.e. r_i = min(a_i, r0_i)
-    * the resource uptake is c_ij = v_ij * r_i / a_i
-        this assumes that the spe can adjust its uptake rate proportionally for each resource to match its growth rate
-    * dN_i/dt = r_i * N_i
-    * dR_j/dt = - uptake + secretion
-        uptake_j = sum_i(c_ij * N_i)
-        secretion_k = sum_ij(b_ijk * (1 - e_ij) * v_ij * N_i)
-    * dilution is either continuous or daily
+    Key Model Features:
 
-    Key features for HACC vs MACC:
-    simple version (preferable, although less supported by data):
-    * km_ij is a function of res diversity, km_ij = km0_ij * (1 + f(gamma_i, R_div))
-    complex version:
-    * km_ij is a function of res identity, km_ij = max_j(km0_ij for all R_j > 0) or something like this
+    Resource Uptake:
+    * Species i uptakes resource j with Monod kinetics: v_ij = v0_ij * R_j / (km_ij + R_j)
+    * Biomass conversion efficiency e_ij
+    * Half-saturation constant km can be modified by:
+        - Default: km_ij = km0_ij / (1 + gamma_i * (nR_consumed - 1))
+        - Custom: provide fun_km(self, R, Rsupp) function
+    * Conversion efficiency e can be modified by:
+        - Default: use fixed e matrix
+        - Custom: provide fun_e(self, R, Rsupp) function
 
-    More thoughts:
-    * v_ij and a_ij also play a huge role in bacteria's response to resource vector. How to set a base line needs careful consideration
-    * Desired behavior:
-        * HACC: low R_div -> high Km, more left
-    * In a continuous / daily dilution scenario, things can be quite different
-        * in continous:
-        * try with example
+    Growth Dynamics (two modes):
+    * 'mod': Growth rate capped by r0
+        - Realized growth rate: a_i = sum_j(e_ij * v_ij)
+        - Actual growth rate: r_i = min(a_i, r0_i)
+        - Adjusted consumption: c_ij = v_ij * r_i / a_i
+        - Species dynamics: dN_i/dt = r_i * N_i - dil * N_i
+    * 'mod2' (default): Unlimited growth rate
+        - Species dynamics: dN_i/dt = sum_j(e_ij * v_ij) * N_i - dil * N_i
+
+    Resource Dynamics:
+    * dR_j/dt = -uptake_j + secretion_j - dil * R_j + dil * Rsupp_j
+    * Uptake: uptake_j = sum_i(c_ij * N_i) for 'mod' or sum_i(v_ij * N_i) for 'mod2'
+    * Secretion: secretion_k = sum_ij(b_ijk * (1 - e_ij) * consumption_ij * N_i)
+
+    Cross-feeding:
+    * If e_ij < 1, unused fraction (1 - e_ij) is secreted as other resources
+    * Distribution controlled by b_ijk matrix, where sum(b_ijk, axis=2) = 1
+
+    Dilution:
+    * Continuous: constant dilution rate dil throughout simulation
+    * Daily: discrete dilution events at interval T (default 24h)
+        - Relationship: dil_daily = 1 - (1 - dil_continuous)^(1/T)
+
+    Additional Methods:
+    * sim(): simulate with continuous dilution
+    * sim_daily_dil(): simulate with daily discrete dilution
+    * __add__() or concat_models(): combine multiple models (concatenate species)
+    * subset(): extract submodel with selected species and/or resources
+    * get_parameters(): return model parameters as dictionary
 
     """
 
@@ -116,8 +129,24 @@ class ConsumerResourceModel:
         self.b = b
         self.gamma = gamma
 
+    # return parameters as a dictionary
+    def get_parameters(self):
+        """Return the model parameters as a dictionary
+        """
+        params = {
+            'nS': self.nS,
+            'nR': self.nR,
+            'v0': self.v0,
+            'km0': self.km0,
+            'r0': self.r0,
+            'e': self.e,
+            'b': self.b,
+            'gamma': self.gamma
+        }
+        return params
+
     # Define the differential equations
-    def model(self, t, y, dil, Rsupp, nRsupp=1, **kwargs):
+    def model(self, t, y, dil, Rsupp, nRsupp=None, fun_km=None, fun_e=None, use_model='mod2'):
         """Define the ode-model for the consumer-resource system
 
         """
@@ -128,30 +157,42 @@ class ConsumerResourceModel:
         R[R < 0] = 0
         R = R.reshape([1, -1])  # 1 * nR
 
-        # TODO: test different ways that gamma affects km
-        #km = self.km0 / (1 + self.gamma * np.sum(R > 1e-1))  # nS * nR
-        #km = self.km0 / (1 + self.gamma * np.sum(R > 0.0001))           
-        if nRsupp < 2:
-            # No gamma effect
-            km = self.km0
+        if nRsupp is None:
+            nRsupp = np.sum(Rsupp > 0)
+
+        # ----- Defining how gamma impact species under different resource supply -----
+        if fun_km is None:
+            nRconsum_curr = np.sum(self.v0 * Rsupp > 0.0001, axis=1, keepdims=True)  # number of R consumed by each species in given Rsupp
+            nRconsum_curr = np.maximum(nRconsum_curr, 1)  # at least 1 to avoid division by 0. when nRconsum_curr==0 the species can't grow anyway
+            km = self.km0 / (1 + self.gamma * (nRconsum_curr - 1))  # this way km0 is the km as defined in single resource condition
         else:
-            # Normal gamma-based formula
-            km = self.km0 / (1 + self.gamma * np.sum(R > 0.0001))
+            km = fun_km(self, R, Rsupp)
+
+        if fun_e is None:
+            e = self.e
+        else:
+            e = fun_e(self, R, Rsupp)
+        # ----- End of definition -----
+
         km = np.maximum(km, 1e-6)  # avoid numerical error
-        # ----- TESTING BEGIN -----
-        if 'fun_km' in kwargs:  # lambda gamma, R: f(gamma, R). note input is of size nR * 1
-            km = self.km0 * kwargs['fun_km'](self.gamma, R)
-        # ----- TESTING END -----
         v = self.v0 * R / (km + R)  # nS * nR
 
-        # TODO: does the scale of a make sense?
-        a = np.sum(self.e * v, axis=1, keepdims=True)  # nS * 1, realized growth rate. maximum equals number of resource
-        r = np.minimum(a, self.r0)
-        dNdt = r * N - dil * N
-        c = v * r / a  # nS * nR, consumption
-        uptake = np.sum(c * N, axis=0, keepdims=True)  # nR * 1
-        secretion = np.sum(np.sum(self.b * ((1 - self.e) * v * N)[:, :, None], axis=0), axis=0, keepdims=True) # nR * 1. sum over spe then res
-        dRdt = -uptake + secretion - dil * R + dil * Rsupp
+        if use_model == 'mod':  # growth rate capped by r0
+            a = np.sum(e * v, axis=1, keepdims=True)  # nS * 1, realized growth rate. maximum equals number of resource
+            r = np.minimum(a, self.r0)
+            dNdt = r * N - dil * N
+            c = v * r / (a + 1e-10)  # nS * nR, consumption
+            uptake = np.sum(c * N, axis=0, keepdims=True)  # nR * 1
+            secretion = np.sum(np.sum(self.b * ((1 - e) * c * N)[:, :, None], axis=0), axis=0, keepdims=True) # nR * 1. sum over spe then res
+            dRdt = -uptake + secretion - dil * R + dil * Rsupp
+        elif use_model == 'mod2':  # no growth rate cap
+            dNdt = np.sum(e * v, axis=1, keepdims=True) * N - dil * N
+            uptake = np.sum(v * N, axis=0, keepdims=True)  # nR * 1
+            secretion = np.sum(np.sum(self.b * ((1 - e) * v * N)[:, :, None], axis=0), axis=0,
+                               keepdims=True)  # nR * 1. sum over spe then res
+            dRdt = -uptake + secretion - dil * R + dil * Rsupp
+        else:
+            raise ValueError(f"use_model {use_model} not recognized. Must be 'mod' or 'mod2'.")
         # # print shapes
         # print("uptake shape: ", uptake.shape)
         # print("secretion shape: ", secretion.shape)
@@ -161,29 +202,59 @@ class ConsumerResourceModel:
         # print("dNdt shape: ", dNdt.shape)
         # print("Rsupp shape: ", Rsupp.shape)
 
-
         return np.concatenate([dNdt.flatten(), dRdt.flatten()])
+
 
     # Simulate the model
     def sim(self, t, N0, R0, dil, Rsupp, nRsupp=None, **kwargs):
-
         """
-        t can be [tini, tend] or a list of time points to evaluate the solution
+        Simulate the consumer-resource model with continuous dilution
+
+        Parameters:
+        * t: time points to evaluate the solution.
+            t can be [tini, tend] or a list of time points to evaluate the solution
+        * N0: initial species abundances (nS,)
+        * R0: initial resource concentrations (nR,)
+        * dil: continuous dilution rate
+        * Rsupp: resource supply concentrations (nR,)
+        * nRsupp: number of resources being supplied. If None, inferred from Rsupp
+        * kwargs: additional arguments for scipy.integrate.solve_ivp
+
         """
         # if kwargs doesn't specify atol and rtol, use default values
         if 'atol' not in kwargs:
             kwargs['atol'] = 1e-6
         if 'rtol' not in kwargs:
             kwargs['rtol'] = 1e-3
-
         # if kwargs doesn't specify method, use RK45
         if 'method' not in kwargs:
             kwargs['method'] = 'RK45'
+        # if kwargs doesn't specify the ODE model to use, use 'mod0' - model()
+        if 'model' not in kwargs:
+            use_model = 'mod'
+        else:
+            use_model = kwargs.pop('model')
+        if 'fun_km' not in kwargs:
+            fun_km = None
+        else:
+            fun_km = kwargs.pop('fun_km')
+        if 'fun_e' not in kwargs:
+            fun_e = None
+        else:
+            fun_e = kwargs.pop('fun_e')
+        if 'model' not in kwargs:
+            use_model = 'mod2'
+        else:
+            use_model = kwargs.pop('use_model')
+
+        if nRsupp is None:
+            nRsupp = np.sum(Rsupp > 0)
 
         y0 = np.concatenate([N0, R0])
 
         # solve ode, deal with different t format
-        odefun = lambda t, y: self.model(t, y, dil=dil, Rsupp=Rsupp, nRsupp=nRsupp, **kwargs)
+        odefun = lambda t, y: self.model(t, y, dil=dil, Rsupp=Rsupp, nRsupp=nRsupp,
+                                         fun_km=fun_km, fun_e=fun_e, use_model=use_model)
     
         if len(t) == 2:
             sol = solve_ivp(odefun, [t[0], t[-1]], y0, **kwargs)
@@ -217,6 +288,7 @@ class ConsumerResourceModel:
         if t is None:
             t_evals = np.arange(nday).reshape([-1, 1]) * T + np.array([0, T]).reshape([1, -1])
         else:
+            assert t[0] >= 0 and t[-1] <= T, "t must be within [0, T]"
             t_evals = np.arange(nday).reshape([-1, 1]) * T + np.array(t).reshape([1, -1])
 
         y0 = np.concatenate([N0, R0])
@@ -285,41 +357,6 @@ class ConsumerResourceModel:
                                        gamma=self.gamma[species_idx])
         return submod
 
-
-def generate_crmodel(nS, nR, seeds, **kwargs):
-    """Generate a consumer-resource model with random parameters
-
-    Parameters
-    ----------
-    nS : int
-        Number of species
-    nR : int
-        Number of resources
-    seeds : int or list of int, optional
-        Random seed(s) to initialize the random number generator. If not provided, the random number generator will be initialized with the current system time.
-
-    Returns
-    -------
-    crmodel : ConsumerResourceModel
-        A consumer-resource model with random parameters
-    """
-    crmodel_list = []
-
-    for seed in seeds:
-        np.random.seed(seed)
-        v0 = np.random.uniform(1, 1, (nS, nR))
-        km0 = np.random.uniform(0, 10, (nS, nR))
-        r0 = np.random.uniform(0.2, 1, nS)
-        e = np.random.uniform(1, 1, (nS, nR))
-        b = np.random.uniform(-3, 1, (nS, nR, nR))
-        b[b < 0] = 0  # sparse
-        b = b / np.sum(b, axis=2, keepdims=True)
-        gamma = np.random.uniform(0, 0, nS)
-
-        crmodel = ConsumerResourceModel(nS, nR, v0, km0, r0, e, b, gamma, **kwargs)
-        crmodel_list.append(crmodel)
-
-    return crmodel_list
 
 # main function
 if __name__ == "__main__":
